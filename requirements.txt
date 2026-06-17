@@ -1,0 +1,12 @@
+# Core scraping / parsing
+requests>=2.31
+beautifulsoup4>=4.12
+lxml>=5.0
+
+# Cloudflare / anti-bot fetching (optional but strongly recommended).
+# The HTTP client degrades gracefully to plain requests if these are missing.
+cloudscraper>=1.2.71
+curl_cffi>=0.7.0
+
+# Analysis / export (optional; only needed for the `analyze` / `export` commands)
+pandas>=2.0

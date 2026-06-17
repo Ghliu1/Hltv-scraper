@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hltv-scraper"
+version = "0.1.0"
+description = "Scrape and analyse professional CS:GO/CS2 statistics from HLTV"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "requests>=2.31",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
+]
+
+[project.optional-dependencies]
+# Strongly recommended for getting past Cloudflare.
+fetch = ["cloudscraper>=1.2.71", "curl_cffi>=0.7.0"]
+analysis = ["pandas>=2.0"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+hltv-scraper = "hltv_scraper.cli:main"
+
+[tool.setuptools]
+packages = [
+    "hltv_scraper",
+    "hltv_scraper.parsers",
+    "hltv_scraper.scrapers",
+    "hltv_scraper.analysis",
+]
