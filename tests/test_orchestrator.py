@@ -12,7 +12,7 @@ from datetime import date
 from hltv_scraper.config import Settings
 from hltv_scraper.db import Database
 from hltv_scraper.scrapers import Orchestrator
-from hltv_scraper.analysis import contribution, meta
+from hltv_scraper.analysis import contribution, meta, profile
 
 FIX = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -97,6 +97,20 @@ class OrchestratorTest(unittest.TestCase):
         frag = meta.fragging_meta(self.db)
         self.assertEqual(len(frag), 1)
         self.assertAlmostEqual(frag[0]["avg_rating"], 1.26)
+
+        # 6) Player profile assembles identity + stats + contribution + H2H
+        prof = profile.build_profile(self.db, 7998)
+        self.assertEqual(prof.nick, "s1mple")
+        self.assertEqual(len(prof.stat_periods), 1)
+        self.assertEqual(len(prof.contribution), 1)
+        self.assertTrue(prof.team_history)            # was on NAVI roster
+        self.assertIn("avg_rating", prof.role_signals)
+
+        # Head-to-head: s1mple recorded kills vs both opponents on the map.
+        h2h = profile.top_head_to_head(self.db, 7998)
+        opp_ids = {h.opponent_id for h in h2h}
+        self.assertIn(7592, opp_ids)  # device (opposing team)
+        self.assertNotIn(7998, opp_ids)  # never self
 
     def test_resumable_scrape_log(self):
         url = "https://www.hltv.org/ranking/teams/2021/august/2"

@@ -62,7 +62,13 @@ hltv-scraper matches --max-pages 50
 # 5. Analyse
 hltv-scraper analyze contribution --min-maps 20 -o contributions.csv
 hltv-scraper analyze fragging-meta -o meta.json
-hltv-scraper analyze timeline --player-id 7998      # a player's career arc
+hltv-scraper analyze timeline --player-id 7998        # a player's career arc
+hltv-scraper analyze head-to-head --player-id 7998    # biggest duel rivalries
+
+# Assemble a full player profile for a period (identity + stats + contribution
+# timeline + head-to-head + role signals) as JSON
+hltv-scraper profile --player-id 7998 --start 2018-01-01 --end 2019-12-31 \
+    -o s1mple_2018-19.json
 
 # Dump any table to CSV for your own modelling
 hltv-scraper export player_stat_periods stats.csv
@@ -127,6 +133,15 @@ for bd in sorted(compute_contributions(db, min_maps=20),
                  key=lambda b: b.score, reverse=True)[:10]:
     print(bd.player_id, round(bd.score, 3), bd.facets)
 ```
+
+### Player profiles
+
+`analysis/profile.py` (CLI: `profile`) stitches the store into one object per
+player and period — identity, team history, the per-period stat records, the
+contribution timeline, top **head-to-head** rivalries (kills for/against and net
+diff), and derived **role signals** (entry / impact / utility / consistency
+indices). This is the concrete "build a profile for a player during a period"
+deliverable.
 
 Because the **per-period component stats are persisted**, the natural next step
 is to *learn* the weights: regress these facets against round-/match-win

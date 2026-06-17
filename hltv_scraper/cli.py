@@ -25,6 +25,7 @@ from .config import Settings
 from .db import Database
 from .analysis import contribution as contrib
 from .analysis import meta as meta_mod
+from .analysis import profile as profile_mod
 
 
 def _parse_date(s: Optional[str]) -> Optional[date]:
@@ -149,6 +150,32 @@ def cmd_analyze(args) -> int:
     elif args.what == "timeline":
         rows = [r.as_dict() for r in contrib.player_timeline(db, args.player_id)]
         _emit(rows, args.output)
+    elif args.what == "head-to-head":
+        rows = [h.as_dict() for h in
+                profile_mod.top_head_to_head(db, args.player_id, args.limit)]
+        _emit(rows, args.output)
+    db.close()
+    return 0
+
+
+def cmd_profile(args) -> int:
+    settings = Settings.from_env()
+    if args.db:
+        settings.db_path = args.db
+    db = Database(settings.db_path)
+    prof = profile_mod.build_profile(
+        db, args.player_id,
+        period_start=args.start, period_end=args.end,
+        h2h_limit=args.h2h_limit,
+    )
+    # A profile is nested; JSON is the natural representation.
+    data = json.dumps(prof.as_dict(), indent=2, default=str)
+    if args.output:
+        with open(args.output, "w") as fh:
+            fh.write(data)
+        print(f"Wrote profile for player {args.player_id} to {args.output}")
+    else:
+        print(data)
     db.close()
     return 0
 
@@ -252,12 +279,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("analyze", help="run an analysis over the datastore")
     sp.add_argument("what", choices=["contribution", "weapon-meta",
-                                     "fragging-meta", "map-meta", "timeline"])
-    sp.add_argument("--player-id", type=int, help="for `timeline`")
+                                     "fragging-meta", "map-meta", "timeline",
+                                     "head-to-head"])
+    sp.add_argument("--player-id", type=int,
+                    help="for `timeline` / `head-to-head`")
     sp.add_argument("--min-maps", type=int, default=0)
     sp.add_argument("--limit", type=int, default=50)
     sp.add_argument("-o", "--output", help="write to .csv or .json (else stdout)")
     sp.set_defaults(func=cmd_analyze)
+
+    sp = sub.add_parser("profile",
+                        help="assemble a full player profile (JSON) for a period")
+    sp.add_argument("--player-id", type=int, required=True)
+    sp.add_argument("--start", help="period lower bound YYYY-MM-DD")
+    sp.add_argument("--end", help="period upper bound YYYY-MM-DD")
+    sp.add_argument("--h2h-limit", type=int, default=15)
+    sp.add_argument("-o", "--output", help="write JSON to this path (else stdout)")
+    sp.set_defaults(func=cmd_profile)
 
     sp = sub.add_parser("export", help="dump a table to CSV")
     sp.add_argument("table")
