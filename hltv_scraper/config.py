@@ -53,6 +53,13 @@ def _env_path(name: str, default: Path) -> Path:
     return Path(os.environ.get(name, str(default))).expanduser()
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    return val.strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass
 class Settings:
     """Runtime settings. Construct via :meth:`from_env` for env-var overrides."""
@@ -90,6 +97,21 @@ class Settings:
     # scrape at scale. Set via HLTV_PROXY.
     proxy: Optional[str] = None
 
+    # --- Browser backend (recommended for real scraping) ------------------
+    # Used only when backend == "browser". A real browser solves Cloudflare's
+    # JS challenge; the session is warmed once and reused (the key anti-ban win).
+    browser_driver: str = "auto"          # auto | undetected | selenium
+    browser_headless: bool = False        # headless is more detectable: keep off
+    browser_warmup: bool = True           # solve the challenge once up front
+    browser_challenge_wait: float = 25.0  # max seconds to wait for clearance
+    browser_binary: Optional[str] = None  # explicit Chrome/Chromium path
+
+    # --- Long-run pacing (ban avoidance) ----------------------------------
+    # Beyond per-request delay, take a longer breather periodically so a
+    # multi-day, full-history scrape looks like intermittent human browsing.
+    requests_per_break: int = 40          # 0 disables periodic breaks
+    break_seconds: float = 90.0
+
     @classmethod
     def from_env(cls) -> "Settings":
         data_dir = _env_path("HLTV_DATA_DIR", Path("data"))
@@ -108,6 +130,13 @@ class Settings:
             ranking_filter=os.environ.get("HLTV_RANKING_FILTER", "Top50"),
             backend=os.environ.get("HLTV_BACKEND", "auto"),
             proxy=os.environ.get("HLTV_PROXY") or None,
+            browser_driver=os.environ.get("HLTV_BROWSER_DRIVER", "auto"),
+            browser_headless=_env_bool("HLTV_BROWSER_HEADLESS", False),
+            browser_warmup=_env_bool("HLTV_BROWSER_WARMUP", True),
+            browser_challenge_wait=_env_float("HLTV_BROWSER_WAIT", 25.0),
+            browser_binary=os.environ.get("HLTV_BROWSER_BINARY") or None,
+            requests_per_break=_env_int("HLTV_REQUESTS_PER_BREAK", 40),
+            break_seconds=_env_float("HLTV_BREAK_SECONDS", 90.0),
         )
 
     def ensure_dirs(self) -> None:

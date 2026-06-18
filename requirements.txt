@@ -8,5 +8,10 @@ lxml>=5.0
 cloudscraper>=1.2.71
 curl_cffi>=0.7.0
 
+# Real-browser backend (HLTV_BACKEND=browser) — most reliable against HLTV's
+# Cloudflare JS challenge. Needs a local Chrome/Chromium. Optional.
+selenium>=4.10
+undetected-chromedriver>=3.5
+
 # Analysis / export (optional; only needed for the `analyze` / `export` commands)
 pandas>=2.0

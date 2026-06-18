@@ -55,11 +55,19 @@ class HltvClient:
         self.settings.ensure_dirs()
         self._last_request = 0.0
         self._session = None
+        self._browser = None
+        self._request_count = 0
         self.backend_name = self._select_backend()
 
     # -- backend selection -------------------------------------------------
     def _select_backend(self) -> str:
         choice = self.settings.backend
+        # The browser backend is never auto-selected (it needs Chrome + a
+        # display); it must be requested explicitly via HLTV_BACKEND=browser.
+        if choice == "browser":
+            from .browser import BrowserSession
+            self._browser = BrowserSession(self.settings)
+            return "browser"
         order = (
             [choice]
             if choice != "auto"
@@ -110,6 +118,16 @@ class HltvClient:
         delay = random.uniform(self.settings.min_delay, self.settings.max_delay)
         if elapsed < delay:
             time.sleep(delay - elapsed)
+
+        # Periodic longer breather so a full-history run looks like a human
+        # browsing intermittently rather than a relentless crawler.
+        self._request_count += 1
+        per_break = self.settings.requests_per_break
+        if per_break and self._request_count % per_break == 0:
+            pause = random.uniform(self.settings.break_seconds,
+                                   self.settings.break_seconds * 1.6)
+            time.sleep(pause)
+
         self._last_request = time.time()
 
     def _headers(self) -> dict:
@@ -129,6 +147,8 @@ class HltvClient:
         return {"http": self.settings.proxy, "https": self.settings.proxy}
 
     def _raw_get(self, url: str) -> tuple[int, str]:
+        if self.backend_name == "browser":
+            return self._browser.get(url)
         headers = self._headers()
         timeout = self.settings.timeout
         proxies = self._proxies()
@@ -187,3 +207,13 @@ class HltvClient:
     def get_cached_only(self, url: str) -> Optional[str]:
         """Return cached HTML if present (never touches the network)."""
         return self._read_cache(url)
+
+    def close(self) -> None:
+        """Release the browser session (if any). Safe to call repeatedly."""
+        if self._browser is not None:
+            self._browser.close()
+        if self._session is not None:
+            try:
+                self._session.close()
+            except Exception:
+                pass

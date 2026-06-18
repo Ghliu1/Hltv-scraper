@@ -114,6 +114,46 @@ class Orchestrator:
         )
         return [(r["player_id"], r["player_nick"]) for r in rows]
 
+    def discover_players_from_stats(self, start: date, end: date,
+                                    ranking_filter: Optional[str] = None,
+                                    period_months: int = 6,
+                                    max_pages_per_period: int = 40,
+                                    min_map_count: int = 0
+                                    ) -> List[tuple[int, str]]:
+        """Discover players via the stats players index, per time window.
+
+        This is the path to broad ("top ~100", tier 1-3) coverage from 2012:
+        for each period it pages through ``/stats/players`` filtered to top
+        teams, persisting every player it finds. Returns the unique players.
+        """
+        ranking_filter = ranking_filter or self.settings.ranking_filter
+        found: dict[int, str] = {}
+        for ps, pe in iter_periods(start, end, period_months):
+            for page in range(max_pages_per_period):
+                url = urls.players_index(ps, pe, ranking_filter,
+                                         offset=page * 50,
+                                         min_map_count=min_map_count or None,
+                                         base=self.settings.base_url)
+                html = self._fetch(url, "players_index", skip_if_done=False)
+                if html is None:
+                    break
+                try:
+                    players = p_player.parse_players_index(html)
+                except Exception as exc:
+                    log.warning("parse players index failed %s: %s", url, exc)
+                    break
+                if not players:
+                    break
+                with self.db.transaction():
+                    self.db.save_all(players)
+                for pl in players:
+                    found.setdefault(pl.id, pl.nick)
+                # A short page means we've reached the end of this period.
+                if len(players) < 30:
+                    break
+            log.info("discovered %d players through %s..%s", len(found), ps, pe)
+        return list(found.items())
+
     def scrape_player_periods(self, player_id: int, nick: str,
                               start: date, end: date,
                               period_months: int = 6,
@@ -156,14 +196,30 @@ class Orchestrator:
                        start: Optional[date] = None, end: Optional[date] = None,
                        period_months: int = 6,
                        ranking_filter: Optional[str] = None,
-                       fetch_individual: bool = True) -> int:
+                       fetch_individual: bool = True,
+                       discover: str = "stats",
+                       min_map_count: int = 0) -> int:
+        """Scrape per-period stats for a set of players.
+
+        ``discover`` controls how the player pool is chosen when ``player_ids``
+        is not given:
+          * ``stats``    — page the stats players index per period (broad,
+            tier 1-3 / "top ~100", works from 2012). Recommended.
+          * ``rankings`` — only players on top-N ranking rosters (top ~30,
+            from 2015). Narrower but exact.
+        """
         start = start or self.settings.start_date
         end = end or date.today()
-        if player_ids is None:
+        if player_ids is not None:
+            nick_by_id = dict(self.discover_player_ids())
+            targets = [(pid, nick_by_id.get(pid, str(pid))) for pid in player_ids]
+        elif discover == "rankings":
             targets = self.discover_player_ids()
         else:
-            nick_by_id = {pid: nick for pid, nick in self.discover_player_ids()}
-            targets = [(pid, nick_by_id.get(pid, str(pid))) for pid in player_ids]
+            targets = self.discover_players_from_stats(
+                start, end, ranking_filter, period_months,
+                min_map_count=min_map_count,
+            )
         total = 0
         for pid, nick in targets:
             total += self.scrape_player_periods(
@@ -291,4 +347,8 @@ class Orchestrator:
         return n
 
     def close(self) -> None:
+        try:
+            self.client.close()
+        except Exception:
+            pass
         self.db.close()

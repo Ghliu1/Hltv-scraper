@@ -16,8 +16,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Strongly recommended for getting past Cloudflare.
+# HTTP-level Cloudflare evasion (basic challenges).
 fetch = ["cloudscraper>=1.2.71", "curl_cffi>=0.7.0"]
+# Real-browser backend — most reliable against HLTV's JS challenge. Requires
+# a local Chrome/Chromium install.
+browser = ["selenium>=4.10", "undetected-chromedriver>=3.5"]
 analysis = ["pandas>=2.0"]
 dev = ["pytest>=7.0"]
 

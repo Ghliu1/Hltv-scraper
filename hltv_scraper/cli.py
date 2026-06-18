@@ -78,6 +78,8 @@ def cmd_players(args) -> int:
         start=_parse_date(args.start), end=_parse_date(args.end),
         period_months=args.period_months,
         fetch_individual=not args.no_individual,
+        discover=args.discover,
+        min_map_count=args.min_map_count,
     )
     print(f"Saved {n} player-period stat records")
     orch.close()
@@ -236,7 +238,7 @@ def build_parser() -> argparse.ArgumentParser:
     def add_common_scrape(sp):
         sp.add_argument("--start", help="YYYY-MM-DD (default: CS:GO release)")
         sp.add_argument("--end", help="YYYY-MM-DD (default: today)")
-        sp.add_argument("--backend", choices=["auto", "curl_cffi",
+        sp.add_argument("--backend", choices=["auto", "browser", "curl_cffi",
                                               "cloudscraper", "requests"])
 
     sp = sub.add_parser("init-db", help="create the SQLite schema")
@@ -252,6 +254,11 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_scrape(sp)
     sp.add_argument("--ids", help="comma-separated player ids (default: discovered)")
     sp.add_argument("--period-months", type=int, default=6)
+    sp.add_argument("--discover", choices=["stats", "rankings"], default="stats",
+                    help="how to choose the player pool (default: stats index, "
+                         "broad coverage from 2012)")
+    sp.add_argument("--min-map-count", type=int, default=0,
+                    help="minimum maps for a player to be discovered/scraped")
     sp.add_argument("--no-individual", action="store_true",
                     help="skip the entries/multikill/clutch sub-page")
     sp.set_defaults(func=cmd_players)

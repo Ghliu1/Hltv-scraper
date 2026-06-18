@@ -23,7 +23,7 @@ reflects that reality and keeps the fragile parts isolated:
 | Layer | Module | Responsibility |
 |-------|--------|----------------|
 | Config | `config.py` | Rate limits, paths, periods, proxy, backend — all env-overridable (`HLTV_*`). |
-| Fetch | `http_client.py` | Cloudflare-aware (`curl_cffi` → `cloudscraper` → `requests`), randomised rate limiting, exponential backoff, **disk cache of every page** (so re-parsing never re-hits the network). |
+| Fetch | `http_client.py` + `browser.py` | Cloudflare-aware backends (**real-browser** via `undetected-chromedriver` → `curl_cffi` → `cloudscraper` → `requests`), one warmed reused session, randomised rate limiting + periodic long breaks, exponential backoff, **disk cache of every page** (so re-parsing never re-hits the network). |
 | Parse | `parsers/` | **Pure** `HTML → dataclass` functions. No network, no DB — unit-tested against saved fixtures. This is the only layer that breaks when HLTV changes its markup. |
 | Model | `models.py` | Typed dataclasses for every entity. |
 | Store | `db.py` | Single-file **SQLite** with idempotent upserts and a scrape log for **resumable** runs. |
@@ -80,18 +80,72 @@ hltv-scraper full --start 2013-01-01
 Every command is **resumable**: re-running skips pages already completed (per
 the `scrape_log` table) and reuses the on-disk HTML cache.
 
-### Getting past Cloudflare
+### Getting past Cloudflare (and not getting banned)
 
-HLTV blocks datacenter IPs (you'll see `FetchError ... HTTP 403`). To scrape for
-real:
+HLTV is behind a Cloudflare **JavaScript challenge** and blocks datacenter IPs
+(you'll see `FetchError ... HTTP 403`). There are two fetch strategies:
 
-* run from a **residential network**, or
-* set a residential/rotating **proxy**: `export HLTV_PROXY="http://user:pass@host:port"`
+| Backend | How | When it works |
+|---------|-----|---------------|
+| `curl_cffi` / `cloudscraper` (HTTP) | Browser-TLS impersonation | Basic challenges, from a clean/residential IP. Lightweight. |
+| **`browser`** (recommended) | Drives a **real Chrome** via `undetected-chromedriver` (Selenium fallback) | The JS/managed challenge. Heaviest but most reliable. |
 
-Tuning knobs (all env vars): `HLTV_MIN_DELAY`, `HLTV_MAX_DELAY` (default 8–16s
-between requests — keep it slow), `HLTV_MAX_RETRIES`, `HLTV_BACKEND`
-(`auto`/`curl_cffi`/`cloudscraper`/`requests`), `HLTV_TOP_N_TEAMS`,
+```bash
+pip install -e ".[browser]"        # needs a local Chrome/Chromium
+export HLTV_BACKEND=browser
+hltv-scraper rankings              # a real browser window opens and solves CF
+```
+
+**Why this avoids bans.** The browser backend launches **one** browser, solves
+the challenge **once** during warm-up, and **reuses that warmed session** (its
+`cf_clearance` cookie) for every page — just like a person browsing. Combined
+with:
+
+* slow, randomised per-request delays (`HLTV_MIN_DELAY`/`HLTV_MAX_DELAY`, default
+  **8–16s**);
+* a **periodic long break** every N requests (`HLTV_REQUESTS_PER_BREAK`=40,
+  `HLTV_BREAK_SECONDS`=90) so a multi-day run looks intermittent;
+* **non-headless** by default (Cloudflare fingerprints headless Chrome);
+* full **resumability** (stop/resume any time; nothing is re-fetched),
+
+…you can crawl the full history slowly and safely. For extra safety use a
+**residential proxy**: `export HLTV_PROXY="http://user:pass@host:port"`.
+
+> Headless server? Run under a virtual display: `xvfb-run -a hltv-scraper ...`,
+> or set `HLTV_BROWSER_HEADLESS=true` (less evasive).
+
+**Tuning knobs** (all env vars): `HLTV_BACKEND`
+(`browser`/`auto`/`curl_cffi`/`cloudscraper`/`requests`), `HLTV_MIN_DELAY`,
+`HLTV_MAX_DELAY`, `HLTV_REQUESTS_PER_BREAK`, `HLTV_BREAK_SECONDS`,
+`HLTV_MAX_RETRIES`, `HLTV_PROXY`, `HLTV_BROWSER_HEADLESS`, `HLTV_BROWSER_DRIVER`
+(`auto`/`undetected`/`selenium`), `HLTV_BROWSER_WAIT`, `HLTV_BROWSER_BINARY`,
 `HLTV_RANKING_FILTER`, `HLTV_CACHE_TTL_DAYS`.
+
+### Recipe: every top team's players, 2012 → today
+
+The weekly **world ranking** only lists ~top 30 and starts in **Sept 2015**, so
+for broad ("top ~100", tier 1–3) coverage going back to CS:GO's release we
+discover players from HLTV's **stats players index** (`/stats/players`), filtered
+to top teams and paged **per period** — this is the `--discover stats` default.
+
+```bash
+export HLTV_BACKEND=browser            # real browser, warmed session
+export HLTV_RANKING_FILTER=Top50       # HLTV's broadest team filter (~tier 1-3)
+
+hltv-scraper init-db
+hltv-scraper rankings --start 2015-09-01            # roster history (2015+)
+hltv-scraper players  --start 2012-08-21 \
+    --period-months 6 --min-map-count 20            # per-player, per-6-months
+hltv-scraper matches  --start 2012-08-21 --max-pages 200   # scoreboards + H2H
+
+# then build profiles / analyse
+hltv-scraper profile --player-id 7998 --start 2018-01-01 --end 2019-12-31
+```
+
+This is intentionally a **long, slow** crawl (days, not minutes) — that's the
+point. It's fully resumable, so run it in chunks. `rankingFilter` caps at
+`Top50` on HLTV; for the widest net set `HLTV_RANKING_FILTER=ALL` and lean on
+`--min-map-count` to keep it to genuine pros.
 
 ---
 

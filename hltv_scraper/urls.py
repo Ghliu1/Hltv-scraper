@@ -58,6 +58,19 @@ def player_matches(player_id: int, slug: str, start: Optional[date] = None,
             + _stats_query(start, end, ranking_filter))
 
 
+def players_index(start: Optional[date] = None, end: Optional[date] = None,
+                  ranking_filter: Optional[str] = None, offset: int = 0,
+                  min_map_count: Optional[int] = None,
+                  base: str = BASE_URL) -> str:
+    extra = {}
+    if offset:
+        extra["offset"] = offset
+    if min_map_count:
+        extra["minMapCount"] = min_map_count
+    return (f"{base}/stats/players"
+            + _stats_query(start, end, ranking_filter, **extra))
+
+
 def matches_list(start: Optional[date] = None, end: Optional[date] = None,
                  ranking_filter: Optional[str] = None, offset: int = 0,
                  base: str = BASE_URL) -> str:

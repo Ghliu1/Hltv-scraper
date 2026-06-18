@@ -87,6 +87,17 @@ class PlayerStatsParserTest(unittest.TestCase):
         self.assertEqual(rec.opening_kills, 1204)
 
 
+class PlayersIndexParserTest(unittest.TestCase):
+    def test_parse_players_index(self):
+        players = player_stats.parse_players_index(load("players_index.html"))
+        by_id = {p.id: p.nick for p in players}
+        # Player links are picked up; team links are ignored.
+        self.assertEqual(by_id[7998], "s1mple")
+        self.assertEqual(by_id[7592], "device")
+        self.assertEqual(by_id[8918], "electronic")
+        self.assertEqual(len(players), 3)
+
+
 class MapStatsParserTest(unittest.TestCase):
     def test_parse_map_stats(self):
         mapstat, perfs = matches.parse_map_stats(load("map_stats.html"), 123456)

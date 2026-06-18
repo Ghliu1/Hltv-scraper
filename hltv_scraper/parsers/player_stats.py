@@ -22,6 +22,32 @@ from .. import models, utils
 from . import common
 
 
+def parse_players_index(html: str) -> list[models.Player]:
+    """Parse the paginated stats *players* listing into Player stubs.
+
+    ``/stats/players?startDate=..&endDate=..&rankingFilter=Top50`` lists every
+    player who featured for a top-ranked team in the window — the discovery
+    source for "top teams' players" over any historical period (works back to
+    2012, where the weekly world ranking does not). We only need id + nick here;
+    full stats are fetched per player afterwards.
+    """
+    sp = common.soup(html)
+    seen: dict[int, models.Player] = {}
+    table = sp.select_one("table.stats-table, table.player-ratings-table")
+    scope = table if table is not None else sp
+    for link in scope.select("a[href*='/stats/players/']"):
+        href = link.get("href", "")
+        # Skip the per-category sub-page links (matches/maps/etc.).
+        pid = common.player_id_from_href(href)
+        if pid is None:
+            continue
+        nick = link.get_text(strip=True)
+        if not nick:
+            continue
+        seen.setdefault(pid, models.Player(id=pid, nick=nick))
+    return list(seen.values())
+
+
 def parse_player_identity(html: str, player_id: int) -> models.Player:
     sp = common.soup(html)
     nick_el = sp.select_one(".summaryNickname, .playerNickname, .context-item-name")

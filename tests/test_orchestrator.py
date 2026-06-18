@@ -34,6 +34,8 @@ class FakeClient:
             return load("ranking.html")
         if "/stats/players/individual/" in url:
             return load("player_individual.html")
+        if "/stats/players?" in url:
+            return load("players_index.html")
         if "/stats/players/" in url:
             return load("player_overview.html")
         if "/mapstatsid/" in url:
@@ -42,6 +44,9 @@ class FakeClient:
 
     def get_cached_only(self, url):
         return None
+
+    def close(self):
+        pass
 
 
 class OrchestratorTest(unittest.TestCase):
@@ -111,6 +116,18 @@ class OrchestratorTest(unittest.TestCase):
         opp_ids = {h.opponent_id for h in h2h}
         self.assertIn(7592, opp_ids)  # device (opposing team)
         self.assertNotIn(7998, opp_ids)  # never self
+
+    def test_stats_based_player_discovery(self):
+        # Discover the broad player pool from the stats index (top ~100 path),
+        # independent of the top-30 ranking rosters.
+        found = self.orch.discover_players_from_stats(
+            date(2018, 1, 1), date(2018, 6, 30), ranking_filter="Top50",
+            period_months=6,
+        )
+        ids = {pid for pid, _ in found}
+        self.assertEqual(ids, {7998, 7592, 8918})
+        # Players persisted for later stat scraping.
+        self.assertEqual(self.db.counts()["players"], 3)
 
     def test_resumable_scrape_log(self):
         url = "https://www.hltv.org/ranking/teams/2021/august/2"
