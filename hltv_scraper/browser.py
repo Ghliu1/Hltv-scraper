@@ -85,6 +85,50 @@ class BrowserSession:
         ]
         return args
 
+    def _detect_chrome_major(self) -> Optional[int]:
+        """Best-effort major version of the local Chrome.
+
+        undetected-chromedriver sometimes fetches the *latest* driver instead of
+        one matching the installed browser, which then fails to start the
+        session. Pinning ``version_main`` avoids that. An explicit setting wins;
+        otherwise we sniff the installed Chrome (versioned folder on Windows, or
+        ``--version`` on POSIX).
+        """
+        if self.settings.browser_version_main:
+            return self.settings.browser_version_main
+        import os
+        import re
+        import subprocess
+
+        bins = []
+        if self.settings.browser_binary:
+            bins.append(self.settings.browser_binary)
+        bins += [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ]
+        # Windows: Chrome installs a versioned sibling folder, e.g.
+        # ...\Application\149.0.7827.155\ — the most reliable version source.
+        for b in bins:
+            try:
+                for name in os.listdir(os.path.dirname(b)):
+                    m = re.match(r"^(\d+)\.\d+\.\d+\.\d+$", name)
+                    if m:
+                        return int(m.group(1))
+            except OSError:
+                continue
+        # POSIX: ask the binary directly.
+        for cmd in ("google-chrome", "chromium", "chromium-browser", "chrome"):
+            try:
+                out = subprocess.run([cmd, "--version"], capture_output=True,
+                                     text=True, timeout=5).stdout
+                m = re.search(r"(\d+)\.\d+\.\d+", out)
+                if m:
+                    return int(m.group(1))
+            except (OSError, subprocess.SubprocessError):
+                continue
+        return None
+
     def _build_undetected(self, headless: bool):
         import undetected_chromedriver as uc  # lazy, guarded
         options = uc.ChromeOptions()
@@ -94,7 +138,11 @@ class BrowserSession:
             options.add_argument(f"--proxy-server={self.settings.proxy}")
         if self.settings.browser_binary:
             options.binary_location = self.settings.browser_binary
-        return uc.Chrome(options=options, headless=headless)
+        version_main = self._detect_chrome_major()
+        if version_main:
+            log.info("pinning undetected-chromedriver to Chrome v%d", version_main)
+        return uc.Chrome(options=options, headless=headless,
+                         version_main=version_main)
 
     def _build_selenium(self, headless: bool):
         from selenium import webdriver  # lazy, guarded

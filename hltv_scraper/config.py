@@ -105,6 +105,11 @@ class Settings:
     browser_warmup: bool = True           # solve the challenge once up front
     browser_challenge_wait: float = 25.0  # max seconds to wait for clearance
     browser_binary: Optional[str] = None  # explicit Chrome/Chromium path
+    # Pin undetected-chromedriver to the installed Chrome's major version. uc
+    # sometimes auto-downloads the *latest* driver (e.g. v150) which then refuses
+    # to drive an older local Chrome (e.g. v149) and crashes the session. None =
+    # auto-detect from the installed Chrome (recommended); set to override.
+    browser_version_main: Optional[int] = None
 
     # --- Long-run pacing (ban avoidance) ----------------------------------
     # Beyond per-request delay, take a longer breather periodically so a
@@ -135,6 +140,8 @@ class Settings:
             browser_warmup=_env_bool("HLTV_BROWSER_WARMUP", True),
             browser_challenge_wait=_env_float("HLTV_BROWSER_WAIT", 25.0),
             browser_binary=os.environ.get("HLTV_BROWSER_BINARY") or None,
+            browser_version_main=(
+                _env_int("HLTV_BROWSER_VERSION_MAIN", 0) or None),
             requests_per_break=_env_int("HLTV_REQUESTS_PER_BREAK", 40),
             break_seconds=_env_float("HLTV_BREAK_SECONDS", 90.0),
         )
