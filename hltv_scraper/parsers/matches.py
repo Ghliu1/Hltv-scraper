@@ -12,6 +12,7 @@ Two page types:
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from .. import models, utils
@@ -90,20 +91,40 @@ def parse_map_stats(html: str, mapstats_id: int) -> tuple[
     sp = common.soup(html)
 
     # --- map / match header ----------------------------------------------
+    # Live HLTV reads "<event> <date> Map <MapName> <teamA> <a> <teamB> <b>";
+    # older/markup variants put the map name in a .bold span instead. Try the
+    # "Map <name>" phrasing first, then fall back to the bold label.
     map_name = None
-    map_el = sp.select_one(".match-info-box .bold, .map-text, .mapname")
-    if map_el:
-        map_name = map_el.get_text(strip=True)
+    info = sp.select_one(".match-info-box")
+    if info:
+        m = re.search(r"\bMap\s+([A-Za-z0-9]+)\b", info.get_text(" ", strip=True))
+        if m:
+            map_name = m.group(1)
+    if not map_name:
+        b = sp.select_one(".match-info-box .bold, .map-text, .mapname")
+        if b:
+            cand = b.get_text(strip=True)
+            if cand and not cand.isdigit() and cand.lower() != "map":
+                map_name = cand
 
     match_id = None
     match_link = sp.select_one("a[href*='/matches/']")
     if match_link:
         match_id = common.match_id_from_href(match_link["href"])
 
+    # Date lives in a [data-unix] element (epoch millis) — most robust source.
     match_date = None
-    date_el = sp.select_one(".match-info-box .small-text, .timeAndEvent .date")
-    if date_el:
-        match_date = utils.parse_date(date_el.get_text())
+    du = sp.select_one("[data-unix]")
+    if du is not None:
+        raw = du.get("data-unix")
+        if raw and raw.isdigit():
+            try:
+                match_date = datetime.fromtimestamp(
+                    int(raw) / 1000, tz=timezone.utc).date()
+            except (ValueError, OverflowError, OSError):
+                match_date = None
+        if match_date is None:
+            match_date = utils.parse_date(du.get_text())
 
     team_links = sp.select(".team-left a[href*='/teams/'], "
                            ".team-right a[href*='/teams/']")
@@ -130,9 +151,11 @@ def parse_map_stats(html: str, mapstats_id: int) -> tuple[
     )
 
     # --- per-player scoreboards (two tables, one per team) ----------------
+    # Each map page has 6 tables: total / CT-side / T-side, twice (once per
+    # team). We want the two *total* tables only — selecting more broadly pulls
+    # in the per-side duplicates and the second team gets dropped.
     perfs: List[models.PlayerMapPerformance] = []
-    tables = sp.select("table.stats-table.totalstats, table.totalstats, "
-                       "table.stats-table")
+    tables = sp.select("table.stats-table.totalstats")
     team_ids = [team1_id, team2_id]
     for ti, table in enumerate(tables[:2]):
         tid = team_ids[ti] if ti < len(team_ids) else None
