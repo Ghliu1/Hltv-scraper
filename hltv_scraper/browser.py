@@ -174,6 +174,15 @@ class BrowserSession:
         if self._driver is not None:
             return
         self._driver, self._driver_kind = self._build_driver()
+        # Bound every navigation so a stuck Cloudflare re-challenge can't hang
+        # driver.get() forever (the cause of multi-hour silent freezes). On
+        # timeout Selenium raises, which our get()/solve handlers catch and turn
+        # into a retry instead of a deadlock.
+        try:
+            self._driver.set_page_load_timeout(
+                max(60.0, self.settings.browser_challenge_wait + 30.0))
+        except Exception:
+            pass
         log.info("browser session started (%s, headless=%s)",
                  self._driver_kind, self.settings.browser_headless)
         if self.settings.browser_warmup:
