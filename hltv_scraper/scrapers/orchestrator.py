@@ -154,43 +154,98 @@ class Orchestrator:
             log.info("discovered %d players through %s..%s", len(found), ps, pe)
         return list(found.items())
 
+    def scrape_player_single_period(self, player_id: int, nick: str,
+                                    ps: date, pe: date,
+                                    ranking_filter: Optional[str] = None,
+                                    fetch_individual: bool = True) -> int:
+        """Scrape one (player, period) cell. Returns 1 if a record was saved."""
+        ranking_filter = ranking_filter or self.settings.ranking_filter
+        slug = slugify(nick)
+        ov_url = urls.player_overview(player_id, slug, ps, pe,
+                                      ranking_filter, self.settings.base_url)
+        overview = self._fetch(ov_url, "player_overview")
+        individual = None
+        if fetch_individual:
+            iv_url = urls.player_individual(player_id, slug, ps, pe,
+                                            ranking_filter,
+                                            self.settings.base_url)
+            individual = self._fetch(iv_url, "player_individual")
+
+        if overview is None and individual is None:
+            return 0
+        try:
+            rec = p_player.parse_player_stats(
+                player_id, ps, pe,
+                overview_html=overview, individual_html=individual,
+                ranking_filter=ranking_filter,
+            )
+        except Exception as exc:
+            log.warning("parse player %s %s-%s failed: %s",
+                        player_id, ps, pe, exc)
+            return 0
+        with self.db.transaction():
+            self.db.save(rec)
+        if overview is not None:
+            self.db.mark_scraped(ov_url, "player_overview", "ok")
+        return 1
+
     def scrape_player_periods(self, player_id: int, nick: str,
                               start: date, end: date,
                               period_months: int = 6,
                               ranking_filter: Optional[str] = None,
                               fetch_individual: bool = True) -> int:
-        ranking_filter = ranking_filter or self.settings.ranking_filter
-        slug = slugify(nick)
         n = 0
         for ps, pe in iter_periods(start, end, period_months):
-            ov_url = urls.player_overview(player_id, slug, ps, pe,
-                                          ranking_filter, self.settings.base_url)
-            overview = self._fetch(ov_url, "player_overview")
-            individual = None
-            if fetch_individual:
-                iv_url = urls.player_individual(player_id, slug, ps, pe,
-                                                ranking_filter,
-                                                self.settings.base_url)
-                individual = self._fetch(iv_url, "player_individual")
-
-            if overview is None and individual is None:
-                continue
-            try:
-                rec = p_player.parse_player_stats(
-                    player_id, ps, pe,
-                    overview_html=overview, individual_html=individual,
-                    ranking_filter=ranking_filter,
-                )
-            except Exception as exc:
-                log.warning("parse player %s %s-%s failed: %s",
-                            player_id, ps, pe, exc)
-                continue
-            with self.db.transaction():
-                self.db.save(rec)
-            if overview is not None:
-                self.db.mark_scraped(ov_url, "player_overview", "ok")
-            n += 1
+            n += self.scrape_player_single_period(
+                player_id, nick, ps, pe, ranking_filter, fetch_individual)
         return n
+
+    def scrape_players_interleaved(self, start: date, end: date,
+                                   ranking_filter: Optional[str] = None,
+                                   period_months: int = 6,
+                                   max_pages_per_period: int = 40,
+                                   min_map_count: int = 0,
+                                   fetch_individual: bool = True) -> int:
+        """Discover and scrape players period-by-period.
+
+        For each time window we page the stats index to learn exactly which
+        players were active *in that window*, then scrape only those
+        (player, period) cells. This avoids the huge waste of the naive
+        "every player × every period" cross-product, where most cells are
+        blank (the player hadn't debuted yet / had retired). Same dataset,
+        a fraction of the requests.
+        """
+        ranking_filter = ranking_filter or self.settings.ranking_filter
+        total = 0
+        for ps, pe in iter_periods(start, end, period_months):
+            active: dict[int, str] = {}
+            for page in range(max_pages_per_period):
+                url = urls.players_index(ps, pe, ranking_filter,
+                                         offset=page * 50,
+                                         min_map_count=min_map_count or None,
+                                         base=self.settings.base_url)
+                html = self._fetch(url, "players_index", skip_if_done=False)
+                if html is None:
+                    break
+                try:
+                    players = p_player.parse_players_index(html)
+                except Exception as exc:
+                    log.warning("parse players index failed %s: %s", url, exc)
+                    break
+                if not players:
+                    break
+                with self.db.transaction():
+                    self.db.save_all(players)
+                for pl in players:
+                    active.setdefault(pl.id, pl.nick)
+                if len(players) < 30:  # short page => end of this period
+                    break
+            for pid, nick in active.items():
+                total += self.scrape_player_single_period(
+                    pid, nick, ps, pe, ranking_filter, fetch_individual)
+            log.info("period %s..%s: %d active players (%d records total)",
+                     ps, pe, len(active), total)
+        return total
 
     def scrape_players(self, player_ids: Optional[Sequence[int]] = None,
                        start: Optional[date] = None, end: Optional[date] = None,
@@ -210,16 +265,19 @@ class Orchestrator:
         """
         start = start or self.settings.start_date
         end = end or date.today()
+        # Default (stats) path: discover + scrape interleaved per period, so we
+        # only ever fetch (player, period) cells that actually hold data.
+        if player_ids is None and discover != "rankings":
+            return self.scrape_players_interleaved(
+                start, end, ranking_filter, period_months,
+                min_map_count=min_map_count, fetch_individual=fetch_individual,
+            )
+        # Explicit ids or the rankings-roster pool: scrape each over the range.
         if player_ids is not None:
             nick_by_id = dict(self.discover_player_ids())
             targets = [(pid, nick_by_id.get(pid, str(pid))) for pid in player_ids]
-        elif discover == "rankings":
-            targets = self.discover_player_ids()
         else:
-            targets = self.discover_players_from_stats(
-                start, end, ranking_filter, period_months,
-                min_map_count=min_map_count,
-            )
+            targets = self.discover_player_ids()
         total = 0
         for pid, nick in targets:
             total += self.scrape_player_periods(
@@ -259,6 +317,78 @@ class Orchestrator:
                     self.scrape_map_scoreboard(row["mapstats_id"],
                                                row.get("map_name") or "x")
                 seen_maps += 1
+        return seen_maps
+
+    def top_teams(self, top_n: int = 100) -> List[tuple[int, str]]:
+        """(team_id, name) for every team ever ranked in the top-N.
+
+        This is the team set the match crawl is driven from. It comes straight
+        from the ranking snapshots already scraped — no extra fetching.
+        """
+        rows = self.db.query(
+            """
+            SELECT tr.team_id, COALESCE(t.name, '') AS name
+            FROM (SELECT DISTINCT team_id FROM team_rankings WHERE rank <= ?) tr
+            LEFT JOIN teams t ON t.id = tr.team_id
+            ORDER BY tr.team_id
+            """,
+            (top_n,),
+        )
+        return [(r["team_id"], r["name"]) for r in rows]
+
+    def scrape_matches_by_team(self, start: Optional[date] = None,
+                               end: Optional[date] = None,
+                               top_n: int = 100,
+                               max_pages_per_team: int = 40,
+                               with_scoreboards: bool = True,
+                               ranking_filter: Optional[str] = None) -> int:
+        """Crawl matches team-by-team for every top-N team.
+
+        For each team we page its stats matches listing within [start, end] and
+        enqueue each map's scoreboard (which yields all ten players' per-map
+        performances). Maps shared by two top teams are fetched once — the
+        scrape log + HTML cache dedupe them.
+        """
+        start = start or self.settings.start_date
+        end = end or date.today()
+        # rankingFilter would *intersect* with the team filter and drop maps
+        # vs non-top opponents; we want all of a top team's maps, so omit it.
+        teams = self.top_teams(top_n)
+        log.info("driving match crawl from %d top-%d teams", len(teams), top_n)
+        seen_maps = 0
+        for idx, (team_id, name) in enumerate(teams, 1):
+            slug = slugify(name) if name else "x"
+            team_seen: set[int] = set()
+            for page in range(max_pages_per_team):
+                url = urls.team_matches(team_id, slug, start, end,
+                                        ranking_filter, offset=page * 50,
+                                        base=self.settings.base_url)
+                html = self._fetch(url, "team_matches", skip_if_done=False)
+                if html is None:
+                    break
+                try:
+                    rows = p_matches.parse_matches_list(html)
+                except Exception as exc:
+                    log.warning("parse team matches failed %s: %s", url, exc)
+                    break
+                if not rows:
+                    break
+                fresh = [r for r in rows if r["mapstats_id"] not in team_seen]
+                # This endpoint can return a team's whole history on one page;
+                # if a page adds no new map ids, paging further is pointless.
+                if not fresh:
+                    break
+                for row in fresh:
+                    team_seen.add(row["mapstats_id"])
+                    self._persist_match_row(row)
+                    if with_scoreboards and row["mapstats_id"] is not None:
+                        self.scrape_map_scoreboard(row["mapstats_id"],
+                                                   row.get("map_name") or "x")
+                    seen_maps += 1
+                if len(rows) < 50:  # short page => no more matches for this team
+                    break
+            log.info("team %d/%d (id=%s): %d maps this team, %d total",
+                     idx, len(teams), team_id, len(team_seen), seen_maps)
         return seen_maps
 
     def _persist_match_row(self, row: dict) -> None:

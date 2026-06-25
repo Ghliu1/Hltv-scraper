@@ -79,6 +79,20 @@ def matches_list(start: Optional[date] = None, end: Optional[date] = None,
             + _stats_query(start, end, ranking_filter, **extra))
 
 
+def team_matches(team_id: int, slug: str = "x", start: Optional[date] = None,
+                 end: Optional[date] = None, ranking_filter: Optional[str] = None,
+                 offset: int = 0, base: str = BASE_URL) -> str:
+    """A single team's played maps in the stats section, date-scoped.
+
+    Driving the match crawl from each top-100 team (rather than HLTV's global
+    Top50 stats filter) is how we honour "top 100 teams, by year" and reach the
+    pre-2015 era that the world ranking doesn't cover.
+    """
+    extra = {"offset": offset} if offset else {}
+    return (f"{base}/stats/teams/matches/{team_id}/{slugify(slug)}"
+            + _stats_query(start, end, ranking_filter, **extra))
+
+
 def map_stats(mapstats_id: int, slug: str = "x", base: str = BASE_URL) -> str:
     return f"{base}/stats/matches/mapstatsid/{mapstats_id}/{slugify(slug)}"
 

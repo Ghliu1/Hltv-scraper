@@ -230,6 +230,44 @@ class BrowserSession:
             return 403, source
         return 200, source
 
+    # -- cookie transplant -------------------------------------------------
+    def solve_and_get_clearance(self, url: str
+                                ) -> Optional[Tuple[str, Optional[str], str]]:
+        """Solve the challenge for ``url`` and return (cf_clearance, UA, html).
+
+        The point of this is to let a *fast* HTTP client reuse the cookie: a
+        real browser pays the ~12s Cloudflare solve once, then the cheap
+        ``curl_cffi`` backend rides the resulting ``cf_clearance`` cookie for
+        every subsequent page (until it expires, at which point we re-solve).
+
+        Returns ``None`` if the challenge did not clear (e.g. the IP has been
+        escalated), so the caller can back off / retry.
+        """
+        self._ensure()
+        try:
+            self._driver.get(url)
+        except Exception as exc:
+            log.warning("clearance navigation error for %s: %s", url, exc)
+            return None
+        if not self._wait_for_clearance():
+            return None
+        try:
+            cookies = {c["name"]: c["value"] for c in self._driver.get_cookies()}
+        except Exception:
+            cookies = {}
+        cf = cookies.get("cf_clearance")
+        if not cf:
+            return None
+        try:
+            ua = self._driver.execute_script("return navigator.userAgent")
+        except Exception:
+            ua = None
+        try:
+            source = self._driver.page_source or ""
+        except Exception:
+            source = ""
+        return cf, ua, source
+
     def close(self) -> None:
         if self._driver is not None:
             try:

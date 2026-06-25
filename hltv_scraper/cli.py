@@ -88,11 +88,18 @@ def cmd_players(args) -> int:
 
 def cmd_matches(args) -> int:
     orch = _orch(args)
-    n = orch.scrape_matches(
-        start=_parse_date(args.start), end=_parse_date(args.end),
-        max_pages=args.max_pages,
-        with_scoreboards=not args.no_scoreboards,
-    )
+    if args.by_team:
+        n = orch.scrape_matches_by_team(
+            start=_parse_date(args.start), end=_parse_date(args.end),
+            top_n=args.top_n,
+            with_scoreboards=not args.no_scoreboards,
+        )
+    else:
+        n = orch.scrape_matches(
+            start=_parse_date(args.start), end=_parse_date(args.end),
+            max_pages=args.max_pages,
+            with_scoreboards=not args.no_scoreboards,
+        )
     print(f"Processed {n} maps")
     orch.close()
     return 0
@@ -238,8 +245,9 @@ def build_parser() -> argparse.ArgumentParser:
     def add_common_scrape(sp):
         sp.add_argument("--start", help="YYYY-MM-DD (default: CS:GO release)")
         sp.add_argument("--end", help="YYYY-MM-DD (default: today)")
-        sp.add_argument("--backend", choices=["auto", "browser", "curl_cffi",
-                                              "cloudscraper", "requests"])
+        sp.add_argument("--backend", choices=["auto", "browser", "hybrid",
+                                              "curl_cffi", "cloudscraper",
+                                              "requests"])
 
     sp = sub.add_parser("init-db", help="create the SQLite schema")
     sp.set_defaults(func=cmd_init_db)
@@ -265,7 +273,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("matches", help="scrape map scoreboards + head-to-head")
     add_common_scrape(sp)
-    sp.add_argument("--max-pages", type=int, default=50)
+    sp.add_argument("--max-pages", type=int, default=50,
+                    help="(global mode) max stats/matches listing pages")
+    sp.add_argument("--by-team", action="store_true",
+                    help="drive the crawl per top-N team (true top-100, covers "
+                         "the pre-2015 era); otherwise use HLTV's global filter")
+    sp.add_argument("--top-n", type=int, default=100,
+                    help="with --by-team: rank cutoff defining 'top' teams")
     sp.add_argument("--no-scoreboards", action="store_true")
     sp.set_defaults(func=cmd_matches)
 

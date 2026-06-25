@@ -57,6 +57,10 @@ class HltvClient:
         self._session = None
         self._browser = None
         self._request_count = 0
+        # Cookie-transplant state (hybrid backend): a cf_clearance solved once in
+        # a real browser, then reused by the fast curl_cffi client.
+        self._cf_clearance: Optional[str] = None
+        self._cf_ua: Optional[str] = None
         self.backend_name = self._select_backend()
 
     # -- backend selection -------------------------------------------------
@@ -68,6 +72,17 @@ class HltvClient:
             from .browser import BrowserSession
             self._browser = BrowserSession(self.settings)
             return "browser"
+        # Hybrid: a real browser solves Cloudflare once to mint a cf_clearance
+        # cookie; the fast curl_cffi client then reuses it for every page. Best
+        # of both — gets past the /stats/ challenge without paying the ~12s
+        # browser solve (or a whole browser) on every request.
+        if choice == "hybrid":
+            from .browser import BrowserSession
+            self._browser = BrowserSession(self.settings)
+            if not _HAS_CURL:
+                raise FetchError("hybrid backend requires curl_cffi "
+                                 "(pip install curl_cffi)")
+            return "hybrid"
         order = (
             [choice]
             if choice != "auto"
@@ -149,6 +164,8 @@ class HltvClient:
     def _raw_get(self, url: str) -> tuple[int, str]:
         if self.backend_name == "browser":
             return self._browser.get(url)
+        if self.backend_name == "hybrid":
+            return self._hybrid_get(url)
         headers = self._headers()
         timeout = self.settings.timeout
         proxies = self._proxies()
@@ -161,6 +178,40 @@ class HltvClient:
         resp = self._session.get(url, headers=headers, timeout=timeout,
                                  proxies=proxies)
         return resp.status_code, resp.text
+
+    # -- hybrid (cookie-transplant) fetch ----------------------------------
+    def _curl_with_clearance(self, url: str) -> tuple[int, str]:
+        headers = self._headers()
+        if self._cf_ua:  # the UA must match the one that minted the cookie
+            headers["User-Agent"] = self._cf_ua
+        resp = curl_requests.get(
+            url, headers=headers, cookies={"cf_clearance": self._cf_clearance},
+            timeout=self.settings.timeout, impersonate="chrome124",
+            proxies=self._proxies(),
+        )
+        return resp.status_code, resp.text
+
+    def _solve_clearance(self, url: str) -> tuple[int, str]:
+        """(Re)solve the challenge in the browser and capture the cookie."""
+        solved = self._browser.solve_and_get_clearance(url)
+        if not solved:
+            return 403, ""
+        self._cf_clearance, self._cf_ua, html = solved
+        # The solve already navigated to ``url`` in the browser, so its HTML is
+        # the page we wanted — return it directly (no extra request needed).
+        return 200, html
+
+    def _hybrid_get(self, url: str) -> tuple[int, str]:
+        # Fast path: ride an existing cf_clearance cookie via curl_cffi.
+        if self._cf_clearance is not None:
+            try:
+                status, text = self._curl_with_clearance(url)
+            except Exception:
+                status, text = -1, ""
+            if status == 200 and text and "Just a moment" not in text[:2000]:
+                return status, text
+            # Cookie likely stale/invalidated — fall through to a re-solve.
+        return self._solve_clearance(url)
 
     # -- public API --------------------------------------------------------
     def get(self, url: str, *, use_cache: bool = True,
