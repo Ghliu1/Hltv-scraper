@@ -336,59 +336,112 @@ class Orchestrator:
         )
         return [(r["team_id"], r["name"]) for r in rows]
 
+    def top_teams_for_year(self, year: int, top_n: int = 100
+                           ) -> List[tuple[int, str]]:
+        """(team_id, name) for teams ranked in the top-N during a given year."""
+        rows = self.db.query(
+            """
+            SELECT DISTINCT tr.team_id, COALESCE(t.name, '') AS name
+            FROM team_rankings tr
+            LEFT JOIN teams t ON t.id = tr.team_id
+            WHERE tr.rank <= ? AND substr(tr.snapshot_date, 1, 4) = ?
+            ORDER BY tr.team_id
+            """,
+            (top_n, str(year)),
+        )
+        return [(r["team_id"], r["name"]) for r in rows]
+
+    def _fallback_year(self, top_n: int) -> Optional[int]:
+        """Earliest year whose top-N set is well-populated (>= top_n teams).
+
+        Used as the team set for pre-ranking years (CS:GO 2012 -> Sep-2015).
+        The first ranked year (late 2015) has only a handful of snapshots, so we
+        skip it in favour of the first full year (2016) as a better proxy for
+        the early scene.
+        """
+        rows = self.db.query(
+            "SELECT substr(snapshot_date,1,4) AS y, COUNT(DISTINCT team_id) AS c "
+            "FROM team_rankings WHERE rank <= ? GROUP BY y ORDER BY y",
+            (top_n,))
+        if not rows:
+            return None
+        for r in rows:
+            if r["c"] >= top_n:
+                return int(r["y"])
+        return int(rows[0]["y"])
+
+    def _scrape_team_window(self, team_id: int, name: str, ws: date, we: date,
+                            max_pages_per_team: int, with_scoreboards: bool,
+                            ranking_filter: Optional[str]) -> int:
+        """Page one team's maps within [ws, we], scraping each scoreboard."""
+        slug = slugify(name) if name else "x"
+        team_seen: set[int] = set()
+        n = 0
+        for page in range(max_pages_per_team):
+            url = urls.team_matches(team_id, slug, ws, we, ranking_filter,
+                                    offset=page * 50, base=self.settings.base_url)
+            html = self._fetch(url, "team_matches", skip_if_done=False)
+            if html is None:
+                break
+            try:
+                rows = p_matches.parse_matches_list(html)
+            except Exception as exc:
+                log.warning("parse team matches failed %s: %s", url, exc)
+                break
+            if not rows:
+                break
+            fresh = [r for r in rows if r["mapstats_id"] not in team_seen]
+            # The endpoint can return the whole window on one page; if a page
+            # adds no new map ids, paging further is pointless.
+            if not fresh:
+                break
+            for row in fresh:
+                team_seen.add(row["mapstats_id"])
+                self._persist_match_row(row)
+                if with_scoreboards and row["mapstats_id"] is not None:
+                    self.scrape_map_scoreboard(row["mapstats_id"],
+                                               row.get("map_name") or "x")
+                n += 1
+            if len(rows) < 50:
+                break
+        return n
+
     def scrape_matches_by_team(self, start: Optional[date] = None,
                                end: Optional[date] = None,
                                top_n: int = 100,
                                max_pages_per_team: int = 40,
                                with_scoreboards: bool = True,
                                ranking_filter: Optional[str] = None) -> int:
-        """Crawl matches team-by-team for every top-N team.
+        """Crawl matches year-by-year for each year's top-N teams.
 
-        For each team we page its stats matches listing within [start, end] and
-        enqueue each map's scoreboard (which yields all ten players' per-map
-        performances). Maps shared by two top teams are fetched once — the
-        scrape log + HTML cache dedupe them.
+        For every calendar year in [start, end] we take *that year's* top-N
+        teams (from the ranking snapshots) and scrape only *that year's* maps
+        for them — so a team contributes the years it was actually top-N, not
+        its whole history. Years before HLTV's ranking existed (pre Sep-2015)
+        fall back to the earliest ranked year's team set as a proxy. Maps shared
+        by two top teams are fetched once (scrape log + HTML cache dedupe).
+        rankingFilter is intentionally omitted: we want all of a top team's
+        maps, not only those vs other top teams.
         """
         start = start or self.settings.start_date
         end = end or date.today()
-        # rankingFilter would *intersect* with the team filter and drop maps
-        # vs non-top opponents; we want all of a top team's maps, so omit it.
-        teams = self.top_teams(top_n)
-        log.info("driving match crawl from %d top-%d teams", len(teams), top_n)
+        fallback_year = self._fallback_year(top_n)
         seen_maps = 0
-        for idx, (team_id, name) in enumerate(teams, 1):
-            slug = slugify(name) if name else "x"
-            team_seen: set[int] = set()
-            for page in range(max_pages_per_team):
-                url = urls.team_matches(team_id, slug, start, end,
-                                        ranking_filter, offset=page * 50,
-                                        base=self.settings.base_url)
-                html = self._fetch(url, "team_matches", skip_if_done=False)
-                if html is None:
-                    break
-                try:
-                    rows = p_matches.parse_matches_list(html)
-                except Exception as exc:
-                    log.warning("parse team matches failed %s: %s", url, exc)
-                    break
-                if not rows:
-                    break
-                fresh = [r for r in rows if r["mapstats_id"] not in team_seen]
-                # This endpoint can return a team's whole history on one page;
-                # if a page adds no new map ids, paging further is pointless.
-                if not fresh:
-                    break
-                for row in fresh:
-                    team_seen.add(row["mapstats_id"])
-                    self._persist_match_row(row)
-                    if with_scoreboards and row["mapstats_id"] is not None:
-                        self.scrape_map_scoreboard(row["mapstats_id"],
-                                                   row.get("map_name") or "x")
-                    seen_maps += 1
-                if len(rows) < 50:  # short page => no more matches for this team
-                    break
-            log.info("team %d/%d (id=%s): %d maps this team, %d total",
-                     idx, len(teams), team_id, len(team_seen), seen_maps)
+        for year in range(start.year, end.year + 1):
+            teams = self.top_teams_for_year(year, top_n)
+            note = ""
+            if not teams and fallback_year:
+                teams = self.top_teams_for_year(fallback_year, top_n)
+                note = f" (pre-ranking; using {fallback_year} top-{top_n} set)"
+            ws = max(date(year, 1, 1), start)
+            we = min(date(year, 12, 31), end)
+            log.info("year %d: %d top-%d teams%s", year, len(teams), top_n, note)
+            for idx, (team_id, name) in enumerate(teams, 1):
+                seen_maps += self._scrape_team_window(
+                    team_id, name, ws, we, max_pages_per_team,
+                    with_scoreboards, ranking_filter)
+                log.info("  year %d: team %d/%d (id=%s) -> %d maps total",
+                         year, idx, len(teams), team_id, seen_maps)
         return seen_maps
 
     def _persist_match_row(self, row: dict) -> None:
