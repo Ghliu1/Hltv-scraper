@@ -120,9 +120,25 @@ CREATE TABLE IF NOT EXISTS player_map_performance (
     kills INTEGER, deaths INTEGER, assists INTEGER, kddiff INTEGER,
     adr REAL, kast REAL, rating REAL,
     first_kills INTEGER, first_deaths INTEGER, headshot_pct REAL,
+    -- from the per-map kill matrix (performance page); see map_duels
+    opening_kills INTEGER, opening_deaths INTEGER,
+    awp_kills INTEGER, awp_deaths INTEGER,
     PRIMARY KEY (map_id, player_id)
 );
 CREATE INDEX IF NOT EXISTS idx_pmp_player ON player_map_performance(player_id);
+
+-- Directed per-map kill matrix: killer -> victim totals, opening, AWP.
+CREATE TABLE IF NOT EXISTS map_duels (
+    map_id    INTEGER NOT NULL,
+    killer_id INTEGER NOT NULL,
+    victim_id INTEGER NOT NULL,
+    kills       INTEGER DEFAULT 0,
+    first_kills INTEGER DEFAULT 0,
+    awp_kills   INTEGER DEFAULT 0,
+    PRIMARY KEY (map_id, killer_id, victim_id)
+);
+CREATE INDEX IF NOT EXISTS idx_duels_killer ON map_duels(killer_id);
+CREATE INDEX IF NOT EXISTS idx_duels_victim ON map_duels(victim_id);
 
 CREATE TABLE IF NOT EXISTS head_to_head (
     player_id   INTEGER NOT NULL,
@@ -175,6 +191,7 @@ _PK = {
     "matches": ["id"],
     "map_stats": ["id"],
     "player_map_performance": ["map_id", "player_id"],
+    "map_duels": ["map_id", "killer_id", "victim_id"],
     "head_to_head": ["player_id", "opponent_id", "context"],
     "weapon_kills": ["player_id", "period_start", "period_end", "weapon"],
 }
@@ -188,7 +205,28 @@ class Database:
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after a DB was first created (idempotent)."""
+        have = {r[1] for r in
+                self.conn.execute("PRAGMA table_info(player_map_performance)")}
+        for col in ("opening_kills", "opening_deaths", "awp_kills", "awp_deaths"):
+            if col not in have:
+                self.conn.execute(
+                    f"ALTER TABLE player_map_performance ADD COLUMN {col} INTEGER")
+
+    def update_map_advanced(self, map_id: int, player_id: int, *,
+                            opening_kills: int, opening_deaths: int,
+                            awp_kills: int, awp_deaths: int) -> None:
+        """Fill a scoreboard row's kill-matrix-derived columns."""
+        self.conn.execute(
+            "UPDATE player_map_performance SET opening_kills=?, opening_deaths=?,"
+            " awp_kills=?, awp_deaths=? WHERE map_id=? AND player_id=?",
+            (opening_kills, opening_deaths, awp_kills, awp_deaths,
+             map_id, player_id),
+        )
 
     # -- lifecycle ---------------------------------------------------------
     def close(self) -> None:
@@ -236,6 +274,7 @@ class Database:
         models.Match: "matches",
         models.MapStat: "map_stats",
         models.PlayerMapPerformance: "player_map_performance",
+        models.MapDuel: "map_duels",
         models.HeadToHeadDuel: "head_to_head",
         models.WeaponKills: "weapon_kills",
     }

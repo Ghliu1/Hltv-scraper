@@ -42,13 +42,13 @@ class Orchestrator:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-    def _fetch(self, url: str, kind: str, *, skip_if_done: bool = True
-               ) -> Optional[str]:
+    def _fetch(self, url: str, kind: str, *, skip_if_done: bool = True,
+               use_cache: bool = True) -> Optional[str]:
         if skip_if_done and self.db.is_scraped(url):
             log.debug("skip (already scraped): %s", url)
             return None
         try:
-            html = self.client.get(url)
+            html = self.client.get(url, use_cache=use_cache)
         except FetchError as exc:
             log.warning("fetch failed: %s (%s)", url, exc)
             self.db.mark_scraped(url, kind, status="error")
@@ -460,6 +460,12 @@ class Orchestrator:
             self.db.save(mapstat)
 
     def scrape_map_scoreboard(self, mapstats_id: int, slug: str = "x") -> bool:
+        ok = self._scrape_map_overview(mapstats_id, slug)
+        if self.settings.scrape_performance:
+            self._scrape_map_performance(mapstats_id, slug)
+        return ok
+
+    def _scrape_map_overview(self, mapstats_id: int, slug: str = "x") -> bool:
         url = urls.map_stats(mapstats_id, slug, self.settings.base_url)
         html = self._fetch(url, "map_stats")
         if html is None:
@@ -475,6 +481,42 @@ class Orchestrator:
             self.db.save_all(perfs)
             self._derive_head_to_head(mapstats_id, perfs)
         self.db.mark_scraped(url, "map_stats", "ok")
+        return True
+
+    def _scrape_map_performance(self, mapstats_id: int, slug: str = "x") -> bool:
+        """Fetch the map's kill matrix: real H2H + per-map opening & AWP kills.
+
+        Tracked under its own scrape-log key so it backfills maps whose
+        scoreboard was already done. Not cached on disk — these pages are ~4-5 MB
+        of mostly chrome (the matrix itself is tiny), which would balloon the
+        cache across tens of thousands of maps.
+        """
+        url = urls.map_performance(mapstats_id, slug, self.settings.base_url)
+        html = self._fetch(url, "map_performance", use_cache=False)
+        if html is None:
+            return False
+        try:
+            duels = p_matches.parse_map_performance(html, mapstats_id)
+        except Exception as exc:
+            log.warning("parse map performance failed %s: %s", url, exc)
+            self.db.mark_scraped(url, "map_performance", "error")
+            return False
+        # Per-player aggregates: opening kills/deaths and AWP kills/deaths.
+        agg: dict[int, list[int]] = {}
+        for d in duels:
+            agg.setdefault(d.killer_id, [0, 0, 0, 0])
+            agg.setdefault(d.victim_id, [0, 0, 0, 0])
+            agg[d.killer_id][0] += d.first_kills   # opening kills
+            agg[d.victim_id][1] += d.first_kills   # opening deaths
+            agg[d.killer_id][2] += d.awp_kills     # AWP kills
+            agg[d.victim_id][3] += d.awp_kills      # AWP deaths
+        with self.db.transaction():
+            self.db.save_all(duels)
+            for pid, (ok_, od_, ak_, ad_) in agg.items():
+                self.db.update_map_advanced(
+                    mapstats_id, pid, opening_kills=ok_, opening_deaths=od_,
+                    awp_kills=ak_, awp_deaths=ad_)
+        self.db.mark_scraped(url, "map_performance", "ok")
         return True
 
     def _derive_head_to_head(self, map_id: int,

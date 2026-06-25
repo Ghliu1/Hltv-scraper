@@ -191,3 +191,70 @@ def parse_map_stats(html: str, mapstats_id: int) -> tuple[
             ))
 
     return mapstat, perfs
+
+
+# Each kill-matrix view lives in a container whose id encodes the kind. Cell
+# text is "X : Y" = (row player's kills on column player) : (column on row).
+_MATRIX_FIELDS = {
+    "ALL-content": "kills",
+    "FIRST_KILL-content": "first_kills",
+    "AWP-content": "awp_kills",
+}
+
+
+def _matrix_pid(cell) -> Optional[int]:
+    a = cell.select_one("a[href*='/players/']")
+    return common.player_id_from_href(a["href"]) if a else None
+
+
+def _matrix_pair(text: str) -> tuple[int, int]:
+    m = re.match(r"\s*(\d+)\s*:\s*(\d+)", text or "")
+    return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+
+
+def parse_map_performance(html: str, map_id: int) -> List[models.MapDuel]:
+    """Parse the three kill matrices (total / first-kill / AWP) on a map's
+    Performance page into directed per-pair duel counts.
+
+    Rows are one team's players, columns the other's; each cell carries both
+    directions, so every pair is recorded twice (killer->victim). Intra-team
+    pairs never appear (teammates don't duel)."""
+    sp = common.soup(html)
+    duels: dict[tuple[int, int], dict] = {}
+
+    def bump(killer: int, victim: int, field: str, n: int) -> None:
+        if not n:
+            return
+        d = duels.setdefault((killer, victim),
+                             {"kills": 0, "first_kills": 0, "awp_kills": 0})
+        d[field] += n
+
+    for cont_id, field in _MATRIX_FIELDS.items():
+        cont = sp.select_one(f"#{cont_id}")
+        table = cont.select_one("table") if cont else None
+        if table is None:
+            continue
+        rows = table.select("tr")
+        if len(rows) < 2:
+            continue
+        header = rows[0].select("th, td")
+        victim_ids = [_matrix_pid(c) for c in header[1:]]
+        for row in rows[1:]:
+            cells = row.select("th, td")
+            if not cells:
+                continue
+            killer = _matrix_pid(cells[0])
+            if killer is None:
+                continue
+            for vi, cell in enumerate(cells[1:]):
+                if vi >= len(victim_ids):
+                    break
+                victim = victim_ids[vi]
+                if victim is None:
+                    continue
+                kf, kv = _matrix_pair(cell.get_text(strip=True))
+                bump(killer, victim, field, kf)
+                bump(victim, killer, field, kv)
+
+    return [models.MapDuel(map_id=map_id, killer_id=k, victim_id=v, **vals)
+            for (k, v), vals in duels.items()]

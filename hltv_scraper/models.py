@@ -266,6 +266,28 @@ class HeadToHeadDuel:
 
 
 @dataclass
+class MapDuel:
+    """Directed per-map kill counts from HLTV's kill matrix.
+
+    For an ordered pair (killer -> victim) on one map: total kills, opening
+    (first) kills, and AWP kills. Summing a killer's rows yields that player's
+    per-map kills / opening kills / AWP kills; the directed form preserves the
+    full head-to-head matrix (the real version of :class:`HeadToHeadDuel`,
+    which elsewhere is only approximated from scoreboard totals).
+    """
+
+    map_id: int
+    killer_id: int
+    victim_id: int
+    kills: int = 0
+    first_kills: int = 0
+    awp_kills: int = 0
+
+    def to_row(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
 class WeaponKills:
     """Per-player weapon usage, the basis for weapon-meta analysis."""
 

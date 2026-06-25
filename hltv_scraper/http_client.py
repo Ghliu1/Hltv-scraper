@@ -235,7 +235,8 @@ class HltvClient:
                 status, text = -1, ""
 
             if status == 200 and text and "Just a moment" not in text[:2000]:
-                self._write_cache(url, text)
+                if use_cache:
+                    self._write_cache(url, text)
                 return text
 
             if status in (403, 429, 503) or status == -1:

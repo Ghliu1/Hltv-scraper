@@ -97,6 +97,11 @@ def map_stats(mapstats_id: int, slug: str = "x", base: str = BASE_URL) -> str:
     return f"{base}/stats/matches/mapstatsid/{mapstats_id}/{slugify(slug)}"
 
 
+def map_performance(mapstats_id: int, slug: str = "x", base: str = BASE_URL) -> str:
+    """The map's Performance tab — the kill matrix (total / first / AWP)."""
+    return f"{base}/stats/matches/performance/mapstatsid/{mapstats_id}/{slugify(slug)}"
+
+
 def events_archive(offset: int = 0, base: str = BASE_URL) -> str:
     extra = {"offset": offset} if offset else {}
     q = ("?" + urlencode(extra)) if extra else ""
