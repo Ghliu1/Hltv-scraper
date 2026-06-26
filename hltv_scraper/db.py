@@ -11,7 +11,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterable, Iterator, Sequence
+from typing import Iterable, Iterator, Optional, Sequence
 
 from . import models
 
@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS team_rankings (
     PRIMARY KEY (snapshot_date, team_id)
 );
 CREATE INDEX IF NOT EXISTS idx_rank_date ON team_rankings(snapshot_date, rank);
+CREATE INDEX IF NOT EXISTS idx_rank_team ON team_rankings(team_id, snapshot_date);
 
 CREATE TABLE IF NOT EXISTS roster_memberships (
     snapshot_date TEXT NOT NULL,
@@ -120,12 +121,34 @@ CREATE TABLE IF NOT EXISTS player_map_performance (
     kills INTEGER, deaths INTEGER, assists INTEGER, kddiff INTEGER,
     adr REAL, kast REAL, rating REAL,
     first_kills INTEGER, first_deaths INTEGER, headshot_pct REAL,
-    -- from the per-map kill matrix (performance page); see map_duels
+    -- richer scoreboard columns
+    headshots INTEGER, flash_assists INTEGER, traded_deaths INTEGER,
     opening_kills INTEGER, opening_deaths INTEGER,
+    multi_kills INTEGER, clutches INTEGER, round_swing REAL,
+    -- from the per-map kill matrix (performance page); see map_duels
     awp_kills INTEGER, awp_deaths INTEGER,
+    -- world rank (at match date) of this player's team and the opponent
+    team_rank INTEGER, opponent_rank INTEGER,
     PRIMARY KEY (map_id, player_id)
 );
 CREATE INDEX IF NOT EXISTS idx_pmp_player ON player_map_performance(player_id);
+
+-- Per-player, per-side (CT/T) scoreboard line for a map.
+CREATE TABLE IF NOT EXISTS player_map_side (
+    map_id      INTEGER NOT NULL,
+    player_id   INTEGER NOT NULL,
+    side        TEXT NOT NULL,
+    player_nick TEXT,
+    team_id     INTEGER,
+    kills INTEGER, deaths INTEGER, assists INTEGER, kddiff INTEGER,
+    adr REAL, kast REAL, rating REAL,
+    headshots INTEGER, flash_assists INTEGER, traded_deaths INTEGER,
+    opening_kills INTEGER, opening_deaths INTEGER,
+    multi_kills INTEGER, clutches INTEGER, round_swing REAL, headshot_pct REAL,
+    team_rank INTEGER, opponent_rank INTEGER,
+    PRIMARY KEY (map_id, player_id, side)
+);
+CREATE INDEX IF NOT EXISTS idx_pms_player ON player_map_side(player_id);
 
 -- Directed per-map kill matrix: killer -> victim totals, opening, AWP.
 CREATE TABLE IF NOT EXISTS map_duels (
@@ -191,6 +214,7 @@ _PK = {
     "matches": ["id"],
     "map_stats": ["id"],
     "player_map_performance": ["map_id", "player_id"],
+    "player_map_side": ["map_id", "player_id", "side"],
     "map_duels": ["map_id", "killer_id", "victim_id"],
     "head_to_head": ["player_id", "opponent_id", "context"],
     "weapon_kills": ["player_id", "period_start", "period_end", "weapon"],
@@ -212,20 +236,43 @@ class Database:
         """Add columns introduced after a DB was first created (idempotent)."""
         have = {r[1] for r in
                 self.conn.execute("PRAGMA table_info(player_map_performance)")}
-        for col in ("opening_kills", "opening_deaths", "awp_kills", "awp_deaths"):
+        int_cols = ("headshots", "flash_assists", "traded_deaths",
+                    "opening_kills", "opening_deaths", "multi_kills",
+                    "clutches", "awp_kills", "awp_deaths",
+                    "team_rank", "opponent_rank")
+        for col in int_cols:
             if col not in have:
                 self.conn.execute(
                     f"ALTER TABLE player_map_performance ADD COLUMN {col} INTEGER")
+        if "round_swing" not in have:
+            self.conn.execute(
+                "ALTER TABLE player_map_performance ADD COLUMN round_swing REAL")
 
-    def update_map_advanced(self, map_id: int, player_id: int, *,
-                            opening_kills: int, opening_deaths: int,
-                            awp_kills: int, awp_deaths: int) -> None:
-        """Fill a scoreboard row's kill-matrix-derived columns."""
+    def team_rank_at(self, team_id, on_date) -> Optional[int]:
+        """World rank of a team at the latest snapshot on or before ``on_date``."""
+        if team_id is None or not on_date:
+            return None
+        row = self.conn.execute(
+            "SELECT rank FROM team_rankings WHERE team_id=? AND snapshot_date<=? "
+            "ORDER BY snapshot_date DESC LIMIT 1", (team_id, str(on_date)),
+        ).fetchone()
+        return row[0] if row else None
+
+    def set_map_ranks(self, map_id: int, team_id, team_rank, opponent_rank) -> None:
+        """Stamp a map's player rows (both tables) with team/opponent rank."""
+        for tbl in ("player_map_performance", "player_map_side"):
+            self.conn.execute(
+                f"UPDATE {tbl} SET team_rank=?, opponent_rank=? "
+                "WHERE map_id=? AND team_id=?",
+                (team_rank, opponent_rank, map_id, team_id))
+
+    def update_map_awp(self, map_id: int, player_id: int,
+                       awp_kills: int, awp_deaths: int) -> None:
+        """Fill a scoreboard row's AWP columns (from the kill matrix)."""
         self.conn.execute(
-            "UPDATE player_map_performance SET opening_kills=?, opening_deaths=?,"
-            " awp_kills=?, awp_deaths=? WHERE map_id=? AND player_id=?",
-            (opening_kills, opening_deaths, awp_kills, awp_deaths,
-             map_id, player_id),
+            "UPDATE player_map_performance SET awp_kills=?, awp_deaths=?"
+            " WHERE map_id=? AND player_id=?",
+            (awp_kills, awp_deaths, map_id, player_id),
         )
 
     # -- lifecycle ---------------------------------------------------------
@@ -274,6 +321,7 @@ class Database:
         models.Match: "matches",
         models.MapStat: "map_stats",
         models.PlayerMapPerformance: "player_map_performance",
+        models.PlayerMapSide: "player_map_side",
         models.MapDuel: "map_duels",
         models.HeadToHeadDuel: "head_to_head",
         models.WeaponKills: "weapon_kills",

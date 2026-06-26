@@ -238,10 +238,21 @@ class PlayerMapPerformance:
     kddiff: Optional[int] = None
     adr: Optional[float] = None
     kast: Optional[float] = None
-    rating: Optional[float] = None
+    rating: Optional[float] = None           # HLTV Rating (3.0 on current pages)
     first_kills: Optional[int] = None
     first_deaths: Optional[int] = None
     headshot_pct: Optional[float] = None
+    # Richer per-map columns now parsed from the scoreboard:
+    headshots: Optional[int] = None          # HS kills, from "K (hs)"
+    flash_assists: Optional[int] = None      # from "A (f)"
+    traded_deaths: Optional[int] = None      # from "D (t)"
+    opening_kills: Optional[int] = None      # from "Op.K-D"
+    opening_deaths: Optional[int] = None
+    multi_kills: Optional[int] = None        # HLTV multi-kill score (MKs)
+    clutches: Optional[int] = None           # 1vX clutches won
+    round_swing: Optional[float] = None      # round swing %
+    # awp_kills / awp_deaths live as DB columns filled from the kill matrix
+    # (performance page), not from the scoreboard, so they're not fields here.
 
     def to_row(self) -> dict:
         return asdict(self)
@@ -260,6 +271,40 @@ class HeadToHeadDuel:
     context: str
     kills: int = 0
     deaths: int = 0
+
+    def to_row(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class PlayerMapSide:
+    """One player's stat line on a single map, restricted to one side (CT or T).
+
+    HLTV renders a CT-only and a T-only scoreboard alongside the totals; this is
+    the same metric set split by side, so you can see e.g. who anchors on CT vs
+    fragging on T."""
+
+    map_id: int
+    player_id: int
+    player_nick: str
+    side: str                                # 'CT' or 'T'
+    team_id: Optional[int] = None
+    kills: Optional[int] = None
+    deaths: Optional[int] = None
+    assists: Optional[int] = None
+    kddiff: Optional[int] = None
+    adr: Optional[float] = None
+    kast: Optional[float] = None
+    rating: Optional[float] = None
+    headshots: Optional[int] = None
+    flash_assists: Optional[int] = None
+    traded_deaths: Optional[int] = None
+    opening_kills: Optional[int] = None
+    opening_deaths: Optional[int] = None
+    multi_kills: Optional[int] = None
+    clutches: Optional[int] = None
+    round_swing: Optional[float] = None
+    headshot_pct: Optional[float] = None
 
     def to_row(self) -> dict:
         return asdict(self)

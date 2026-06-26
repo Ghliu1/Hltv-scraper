@@ -472,6 +472,7 @@ class Orchestrator:
             return False
         try:
             mapstat, perfs = p_matches.parse_map_stats(html, mapstats_id)
+            sides = p_matches.parse_map_sides(html, mapstats_id)
         except Exception as exc:
             log.warning("parse map stats failed %s: %s", url, exc)
             self.db.mark_scraped(url, "map_stats", "error")
@@ -479,9 +480,23 @@ class Orchestrator:
         with self.db.transaction():
             self.db.save(mapstat)
             self.db.save_all(perfs)
+            self.db.save_all(sides)
             self._derive_head_to_head(mapstats_id, perfs)
+            self._assign_opponent_ranks(mapstat)
         self.db.mark_scraped(url, "map_stats", "ok")
         return True
+
+    def _assign_opponent_ranks(self, mapstat: models.MapStat) -> None:
+        """Stamp each player's line with their team's and the opponent's world
+        rank at the map's date (so stats can be split vs Top5/10/20/rest)."""
+        t1, t2 = mapstat.team1_id, mapstat.team2_id
+        d = mapstat.match_date
+        if d is None or (t1 is None and t2 is None):
+            return
+        r1 = self.db.team_rank_at(t1, d)
+        r2 = self.db.team_rank_at(t2, d)
+        self.db.set_map_ranks(mapstat.id, t1, r1, r2)
+        self.db.set_map_ranks(mapstat.id, t2, r2, r1)
 
     def _scrape_map_performance(self, mapstats_id: int, slug: str = "x") -> bool:
         """Fetch the map's kill matrix: real H2H + per-map opening & AWP kills.
@@ -501,21 +516,18 @@ class Orchestrator:
             log.warning("parse map performance failed %s: %s", url, exc)
             self.db.mark_scraped(url, "map_performance", "error")
             return False
-        # Per-player aggregates: opening kills/deaths and AWP kills/deaths.
-        agg: dict[int, list[int]] = {}
+        # AWP kills/deaths per player (row/column sums of the AWP matrix).
+        # Opening kills/deaths come from the scoreboard, not here.
+        awp: dict[int, list[int]] = {}
         for d in duels:
-            agg.setdefault(d.killer_id, [0, 0, 0, 0])
-            agg.setdefault(d.victim_id, [0, 0, 0, 0])
-            agg[d.killer_id][0] += d.first_kills   # opening kills
-            agg[d.victim_id][1] += d.first_kills   # opening deaths
-            agg[d.killer_id][2] += d.awp_kills     # AWP kills
-            agg[d.victim_id][3] += d.awp_kills      # AWP deaths
+            awp.setdefault(d.killer_id, [0, 0])
+            awp.setdefault(d.victim_id, [0, 0])
+            awp[d.killer_id][0] += d.awp_kills     # AWP kills
+            awp[d.victim_id][1] += d.awp_kills      # AWP deaths
         with self.db.transaction():
             self.db.save_all(duels)
-            for pid, (ok_, od_, ak_, ad_) in agg.items():
-                self.db.update_map_advanced(
-                    mapstats_id, pid, opening_kills=ok_, opening_deaths=od_,
-                    awp_kills=ak_, awp_deaths=ad_)
+            for pid, (ak_, ad_) in awp.items():
+                self.db.update_map_awp(mapstats_id, pid, ak_, ad_)
         self.db.mark_scraped(url, "map_performance", "ok")
         return True
 

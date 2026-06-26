@@ -25,6 +25,56 @@ def _stats_team_id(href: str) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
+def _split_paren(text: Optional[str]) -> tuple[Optional[int], Optional[int]]:
+    """'14 (7)' -> (14, 7). Falls back to (the number, None)."""
+    if not text:
+        return None, None
+    m = re.match(r"\s*(-?\d+)\s*\((\d+)\)", text)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    return utils.parse_int(text), None
+
+
+def _split_colon(text: Optional[str]) -> tuple[Optional[int], Optional[int]]:
+    """'0 : 1' -> (0, 1)."""
+    if not text:
+        return None, None
+    m = re.match(r"\s*(-?\d+)\s*:\s*(-?\d+)", text)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    return None, None
+
+
+def _row_metrics(tr) -> dict:
+    """Extract the full per-player metric set from one scoreboard row.
+
+    Keys match the shared fields of PlayerMapPerformance / PlayerMapSide. Takes
+    the first occurrence of each ``st-`` class — the 'traditional' value (HLTV
+    also renders a hidden 'eco-adjusted' duplicate of every column)."""
+    def cell(cls):
+        el = tr.select_one(f".{cls}")
+        return el.get_text(" ", strip=True) if el else None
+
+    kills, headshots = _split_paren(cell("st-kills"))       # "14 (7)"
+    assists, flash = _split_paren(cell("st-assists"))       # "6 (3)"
+    deaths, traded = _split_paren(cell("st-deaths"))        # "16 (2)"
+    op_k, op_d = _split_colon(cell("st-opkd"))              # "0 : 1"
+    hs_pct = (headshots / kills) if (kills and headshots is not None) else None
+    kddiff = (kills - deaths) if (kills is not None and deaths is not None) else None
+    return dict(
+        kills=kills, deaths=deaths, assists=assists, kddiff=kddiff,
+        adr=utils.parse_float(cell("st-adr")),
+        kast=utils.parse_percent(cell("st-kast")),
+        rating=utils.parse_float(cell("st-rating")),
+        headshots=headshots, flash_assists=flash, traded_deaths=traded,
+        opening_kills=op_k, opening_deaths=op_d,
+        multi_kills=utils.parse_int(cell("st-mks")),
+        clutches=utils.parse_int(cell("st-clutches")),
+        round_swing=utils.parse_float(cell("st-roundSwing")),
+        headshot_pct=hs_pct,
+    )
+
+
 def parse_matches_list(html: str) -> List[dict]:
     """Return lightweight dicts describing each played map in a results table.
 
@@ -168,29 +218,46 @@ def parse_map_stats(html: str, mapstats_id: int) -> tuple[
                 continue
             nick = plink.get_text(strip=True)
 
-            def cell(cls):
-                el = tr.select_one(f".{cls}")
-                return el.get_text(strip=True) if el else None
-
-            # "20 (12)" -> kills 20, hs 12
-            kills_txt = cell("st-kills")
-            assists_txt = cell("st-assists")
+            m = _row_metrics(tr)
             perfs.append(models.PlayerMapPerformance(
-                map_id=mapstats_id,
-                player_id=pid,
-                player_nick=nick,
-                team_id=tid,
-                kills=utils.parse_int(kills_txt),
-                deaths=utils.parse_int(cell("st-deaths")),
-                assists=utils.parse_int(assists_txt),
-                kddiff=utils.parse_int(cell("st-kddiff")),
-                adr=utils.parse_float(cell("st-adr")),
-                kast=utils.parse_percent(cell("st-kast")),
-                rating=utils.parse_float(cell("st-rating")),
-                first_kills=utils.parse_int(cell("st-fkdiff")),
-            ))
+                map_id=mapstats_id, player_id=pid, player_nick=nick, team_id=tid,
+                first_kills=m["opening_kills"], first_deaths=m["opening_deaths"],
+                **m))
 
     return mapstat, perfs
+
+
+def parse_map_sides(html: str, mapstats_id: int,
+                    ) -> List[models.PlayerMapSide]:
+    """Per-player, per-side (CT/T) scoreboards for a map.
+
+    HLTV renders a CT-only and a T-only table per team alongside the totals,
+    with the identical column set; this splits each player's line by side."""
+    sp = common.soup(html)
+    team_links = sp.select(".team-left a[href*='/teams/'], "
+                           ".team-right a[href*='/teams/']")
+    team_ids = [None, None]
+    if len(team_links) >= 2:
+        team_ids = [_stats_team_id(team_links[0]["href"]),
+                    _stats_team_id(team_links[1]["href"])]
+
+    out: List[models.PlayerMapSide] = []
+    for side, sel in (("CT", "table.stats-table.ctstats"),
+                      ("T", "table.stats-table.tstats")):
+        for ti, table in enumerate(sp.select(sel)[:2]):
+            tid = team_ids[ti] if ti < len(team_ids) else None
+            for tr in table.select("tbody tr"):
+                plink = tr.select_one("a[href*='/players/']")
+                if plink is None:
+                    continue
+                pid = common.player_id_from_href(plink["href"])
+                if pid is None:
+                    continue
+                out.append(models.PlayerMapSide(
+                    map_id=mapstats_id, player_id=pid,
+                    player_nick=plink.get_text(strip=True), side=side,
+                    team_id=tid, **_row_metrics(tr)))
+    return out
 
 
 # Each kill-matrix view lives in a container whose id encodes the kind. Cell
