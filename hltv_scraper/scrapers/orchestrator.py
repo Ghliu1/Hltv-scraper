@@ -436,12 +436,25 @@ class Orchestrator:
             ws = max(date(year, 1, 1), start)
             we = min(date(year, 12, 31), end)
             log.info("year %d: %d top-%d teams%s", year, len(teams), top_n, note)
+            done = skipped = 0
             for idx, (team_id, name) in enumerate(teams, 1):
+                # Checkpoint per (team, year): once a window is fully walked it's
+                # marked done, so a resume skips it instantly instead of
+                # re-reading its cached pages and re-iterating its maps.
+                wkey = f"teamwindow:{team_id}:{year}"
+                if self.db.is_scraped(wkey):
+                    skipped += 1
+                    continue
                 seen_maps += self._scrape_team_window(
                     team_id, name, ws, we, max_pages_per_team,
                     with_scoreboards, ranking_filter)
-                log.info("  year %d: team %d/%d (id=%s) -> %d maps total",
-                         year, idx, len(teams), team_id, seen_maps)
+                self.db.mark_scraped(wkey, "team_window", "ok")
+                done += 1
+                if done % 25 == 0:
+                    log.info("  year %d: %d/%d teams (%d skipped) -> %d maps",
+                             year, idx, len(teams), skipped, seen_maps)
+            log.info("year %d complete: %d teams scraped, %d already done",
+                     year, done, skipped)
         return seen_maps
 
     def _persist_match_row(self, row: dict) -> None:
@@ -457,7 +470,9 @@ class Orchestrator:
             team2_score=row.get("team2_score"),
         )
         with self.db.transaction():
-            self.db.save(mapstat)
+            # Seed only — never overwrite the authoritative scoreboard-derived
+            # MapStat (which has the real date/scores) on a resume re-walk.
+            self.db.save_ignore(mapstat)
 
     def scrape_map_scoreboard(self, mapstats_id: int, slug: str = "x") -> bool:
         ok = self._scrape_map_overview(mapstats_id, slug)

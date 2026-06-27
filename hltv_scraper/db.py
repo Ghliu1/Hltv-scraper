@@ -331,6 +331,20 @@ class Database:
         table = self._TABLE_BY_TYPE[type(obj)]
         self.upsert(table, obj.to_row())
 
+    def save_ignore(self, obj) -> None:
+        """Insert only if absent — never overwrite an existing row.
+
+        Used to seed a placeholder (e.g. a map from a results listing) without
+        clobbering richer data already gathered for it (its real date/scores)."""
+        table = self._TABLE_BY_TYPE[type(obj)]
+        row = obj.to_row()
+        cols = list(row.keys())
+        conflict = ", ".join(_PK[table])
+        sql = (f"INSERT INTO {table} ({', '.join(cols)}) "
+               f"VALUES ({', '.join(f':{c}' for c in cols)}) "
+               f"ON CONFLICT({conflict}) DO NOTHING")
+        self.conn.execute(sql, row)
+
     def save_all(self, objs: Iterable) -> int:
         n = 0
         for obj in objs:
