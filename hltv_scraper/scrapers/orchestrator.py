@@ -450,9 +450,10 @@ class Orchestrator:
                     with_scoreboards, ranking_filter)
                 self.db.mark_scraped(wkey, "team_window", "ok")
                 done += 1
-                if done % 25 == 0:
-                    log.info("  year %d: %d/%d teams (%d skipped) -> %d maps",
-                             year, idx, len(teams), skipped, seen_maps)
+                # Log every team so run.log stays fresh (a quiet log otherwise
+                # trips the supervisor's stale-runner watchdog).
+                log.info("  year %d: team %d/%d (%d skipped) -> %d maps",
+                         year, idx, len(teams), skipped, seen_maps)
             log.info("year %d complete: %d teams scraped, %d already done",
                      year, done, skipped)
         return seen_maps
