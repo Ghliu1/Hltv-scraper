@@ -390,18 +390,25 @@ class Orchestrator:
                 break
             if not rows:
                 break
-            fresh = [r for r in rows if r["mapstats_id"] not in team_seen]
+            fresh = [r for r in rows if r["mapstats_id"] not in team_seen
+                     and r["mapstats_id"] is not None]
             # The endpoint can return the whole window on one page; if a page
             # adds no new map ids, paging further is pointless.
             if not fresh:
                 break
-            for row in fresh:
-                team_seen.add(row["mapstats_id"])
-                self._persist_match_row(row)
-                if with_scoreboards and row["mapstats_id"] is not None:
-                    self.scrape_map_scoreboard(row["mapstats_id"],
-                                               row.get("map_name") or "x")
-                n += 1
+            for r in fresh:
+                team_seen.add(r["mapstats_id"])
+            concurrent = (with_scoreboards and self.settings.concurrency > 1
+                          and self.client.backend_name == "hybrid")
+            if concurrent:
+                n += self._scrape_maps_concurrent(fresh)
+            else:
+                for row in fresh:
+                    self._persist_match_row(row)
+                    if with_scoreboards:
+                        self.scrape_map_scoreboard(row["mapstats_id"],
+                                                   row.get("map_name") or "x")
+                    n += 1
             if len(rows) < 50:
                 break
         return n
@@ -486,6 +493,10 @@ class Orchestrator:
         html = self._fetch(url, "map_stats")
         if html is None:
             return False
+        return self._store_overview(mapstats_id, url, html)
+
+    def _store_overview(self, mapstats_id: int, url: str, html: str) -> bool:
+        """Parse + persist a scoreboard page (already fetched). Main thread."""
         try:
             mapstat, perfs = p_matches.parse_map_stats(html, mapstats_id)
             sides = p_matches.parse_map_sides(html, mapstats_id)
@@ -493,6 +504,9 @@ class Orchestrator:
             log.warning("parse map stats failed %s: %s", url, exc)
             self.db.mark_scraped(url, "map_stats", "error")
             return False
+        writer = getattr(self.client, "cache_write", None)
+        if writer:
+            writer(url, html)                 # so re-parse works offline later
         with self.db.transaction():
             self.db.save(mapstat)
             self.db.save_all(perfs)
@@ -526,6 +540,10 @@ class Orchestrator:
         html = self._fetch(url, "map_performance", use_cache=False)
         if html is None:
             return False
+        return self._store_performance(mapstats_id, url, html)
+
+    def _store_performance(self, mapstats_id: int, url: str, html: str) -> bool:
+        """Parse + persist a kill-matrix page (already fetched). Main thread."""
         try:
             duels = p_matches.parse_map_performance(html, mapstats_id)
         except Exception as exc:
@@ -546,6 +564,72 @@ class Orchestrator:
                 self.db.update_map_awp(mapstats_id, pid, ak_, ad_)
         self.db.mark_scraped(url, "map_performance", "ok")
         return True
+
+    # ------------------------------------------------------------------
+    # Concurrent map fetching (hybrid backend). Fetches run in a thread pool
+    # sharing the one cf_clearance cookie; all parsing + DB writes + the browser
+    # re-solve stay on the main thread.
+    # ------------------------------------------------------------------
+    def _parallel_fetch(self, fetch_urls: list[str]) -> dict[str, Optional[str]]:
+        from concurrent.futures import ThreadPoolExecutor
+
+        def one(u: str):
+            # overview pages are disk-cached; performance pages are not
+            if "/performance/" not in u:
+                cached = self.client.get_cached_only(u)
+                if cached is not None:
+                    return u, cached
+            status, text = self.client.fetch_cookie_raw(u)
+            return u, (text if status == 200 else None)
+
+        out: dict[str, Optional[str]] = {}
+        workers = max(1, self.settings.concurrency)
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for u, html in ex.map(one, fetch_urls):
+                out[u] = html
+        # A run of failures usually means the cookie expired — re-solve once
+        # (main thread) and retry the failures.
+        failed = [u for u in fetch_urls if not out.get(u)]
+        if failed and self.client.refresh_clearance(failed[0]):
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                for u, html in ex.map(one, failed):
+                    if html:
+                        out[u] = html
+        return out
+
+    def _scrape_maps_concurrent(self, rows: list[dict]) -> int:
+        for row in rows:
+            self._persist_match_row(row)
+        ov_url: dict[int, str] = {}
+        pf_url: dict[int, str] = {}
+        fetch_urls: list[str] = []
+        for row in rows:
+            mid = row["mapstats_id"]
+            slug = row.get("map_name") or "x"
+            ou = urls.map_stats(mid, slug, self.settings.base_url)
+            ov_url[mid] = ou
+            if not self.db.is_scraped(ou):
+                fetch_urls.append(ou)
+            if self.settings.scrape_performance:
+                pu = urls.map_performance(mid, slug, self.settings.base_url)
+                pf_url[mid] = pu
+                if not self.db.is_scraped(pu):
+                    fetch_urls.append(pu)
+        if not fetch_urls:
+            return len(rows)
+        if not self.client.ensure_clearance(fetch_urls[0]):
+            return len(rows)   # couldn't solve; leave for a later run
+        htmls = self._parallel_fetch(fetch_urls)
+        # Parse + persist serially on the main thread.
+        for mid, ou in ov_url.items():
+            html = htmls.get(ou)
+            if html:
+                self._store_overview(mid, ou, html)
+        for mid, pu in pf_url.items():
+            html = htmls.get(pu)
+            if html:
+                self._store_performance(mid, pu, html)
+        return len(rows)
 
     def _derive_head_to_head(self, map_id: int,
                              perfs: Sequence[models.PlayerMapPerformance]) -> None:

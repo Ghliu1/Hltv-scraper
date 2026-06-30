@@ -91,6 +91,12 @@ class Settings:
     # head-to-head + per-map opening-duel and AWP kills. Doubles match fetches.
     scrape_performance: bool = True
 
+    # Concurrent map page fetches (hybrid backend only). The one cf_clearance
+    # cookie backs many parallel curl requests, so this is the main free speedup
+    # — but N concurrent requests from one IP raises rate-limit/ban odds, so keep
+    # it moderate. 1 = fully sequential (old behaviour).
+    concurrency: int = 1
+
     # --- Backend selection ------------------------------------------------
     # Order in which HTTP backends are attempted. Valid: curl_cffi, cloudscraper,
     # requests. The first importable one wins unless a single backend is forced.
@@ -138,6 +144,7 @@ class Settings:
             top_n_teams=_env_int("HLTV_TOP_N_TEAMS", 100),
             ranking_filter=os.environ.get("HLTV_RANKING_FILTER", "Top50"),
             scrape_performance=_env_bool("HLTV_SCRAPE_PERFORMANCE", True),
+            concurrency=_env_int("HLTV_CONCURRENCY", 1),
             backend=os.environ.get("HLTV_BACKEND", "auto"),
             proxy=os.environ.get("HLTV_PROXY") or None,
             browser_driver=os.environ.get("HLTV_BROWSER_DRIVER", "auto"),

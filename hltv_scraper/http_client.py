@@ -213,6 +213,47 @@ class HltvClient:
             # Cookie likely stale/invalidated — fall through to a re-solve.
         return self._solve_clearance(url)
 
+    # -- concurrent cookie-fetch (hybrid only) -----------------------------
+    # The cf_clearance cookie can back many parallel curl_cffi requests at once,
+    # so the bulk map fetches can run concurrently while the browser solves the
+    # challenge only once. These primitives are split so the orchestrator can
+    # fetch in a thread pool but keep the (non-thread-safe) browser solve and
+    # all DB writes on the main thread.
+    def ensure_clearance(self, url: str) -> bool:
+        """Solve the challenge once if we don't yet hold a cookie. Main thread."""
+        if self.backend_name != "hybrid":
+            return False
+        if self._cf_clearance is None:
+            self._solve_clearance(url)
+        return self._cf_clearance is not None
+
+    def refresh_clearance(self, url: str) -> bool:
+        """Force a re-solve (cookie expired). Main thread only."""
+        if self.backend_name != "hybrid":
+            return False
+        self._solve_clearance(url)
+        return self._cf_clearance is not None
+
+    def fetch_cookie_raw(self, url: str) -> tuple[int, str]:
+        """One curl fetch riding the current cookie. Thread-safe; no throttle,
+        no cache, no re-solve. Returns (200, html) on success else (status,*)."""
+        if self.backend_name != "hybrid" or self._cf_clearance is None:
+            return -1, ""
+        try:
+            status, text = self._curl_with_clearance(url)
+        except Exception:
+            return -1, ""
+        if status == 200 and text and "Just a moment" not in text[:2000]:
+            return 200, text
+        return status, text
+
+    def cache_write(self, url: str, text: str) -> None:
+        """Expose the disk cache so concurrently-fetched pages can be cached."""
+        self._write_cache(url, text)
+
+    def is_cookie_set(self) -> bool:
+        return self._cf_clearance is not None
+
     # -- public API --------------------------------------------------------
     def get(self, url: str, *, use_cache: bool = True,
             force: bool = False) -> str:
